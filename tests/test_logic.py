@@ -49,6 +49,48 @@ def test_search_threshold_and_structured_summary():
     assert "### 关键点" in summary.to_markdown()
 
 
+
+
+def test_hybrid_search_exposes_component_scores_and_confidence():
+    index = DocumentIndex([
+        load_file(Path("docs/company_overview.md"))[1],
+        load_file(Path("docs/company_overview.md"))[2],
+    ])
+    hits = index.search("预算", top_k=1)
+    assert hits
+    hit = hits[0]
+    assert 0 <= hit.tfidf_score <= 1
+    assert 0 <= hit.keyword_score <= 1
+    assert hit.score == pytest.approx(0.75 * hit.tfidf_score + 0.25 * hit.keyword_score)
+    assert hit.confidence == hit.score
+
+
+def test_answer_quality_and_citation_coverage_states():
+    index = DocumentIndex(load_file(Path("docs/company_overview.md")))
+    grounded = index.ask("预算")
+    assert grounded.quality_status == "grounded"
+    assert grounded.citation_coverage == pytest.approx(1.0)
+    assert grounded.confidence > 0
+
+    low = index.ask("预算 完全不存在的词")
+    assert low.quality_status == "low_evidence"
+    assert 0 < low.citation_coverage < 1
+
+    empty = DocumentIndex().ask("任何问题")
+    assert empty.quality_status == "no_evidence"
+    assert empty.citation_coverage == 0
+    assert empty.confidence == 0
+
+
+def test_corpus_insights_include_counts_keywords_and_numbers():
+    index = DocumentIndex(load_file(Path("docs/company_overview.md")))
+    assert index.insights.file_count == 1
+    assert index.insights.chunk_count == 5
+    assert any(word == "项" for word, _ in index.insights.top_keywords)
+    assert "100" in index.insights.numeric_discoveries
+    assert "2024" in index.insights.numeric_discoveries
+
+
 def test_unsupported_file_type():
     with pytest.raises(ValueError):
         load_file("bad.pdf")

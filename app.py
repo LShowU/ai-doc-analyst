@@ -75,10 +75,23 @@ with st.expander(f"已加载文件（{len(paths)}）"):
         st.write("\n".join(f"- {Path(path).name}" for path in paths))
     else:
         st.info("请从左侧上传文件，或在 docs/ 放入 txt、md、csv。")
-col1, col2, col3 = st.columns(3)
+col1, col2, col3, col4 = st.columns(4)
 col1.metric("已索引片段", f"{len(index.chunks):,}", help="当前文档被切分并建立检索索引的片段数")
 col2.metric("文档数量", f"{len(paths):,}", help="当前工作区中的 TXT、Markdown 和 CSV 文件")
 col3.metric("CSV 文件", f"{sum(Path(p).suffix.lower() == '.csv' for p in paths):,}", help="可进入 CSV 分析页查看统计摘要")
+col4.metric("关键词数", f"{len(index.insights.top_keywords):,}", help="语料中出现频率最高的关键词条目")
+
+with st.expander("语料洞察"):
+    insight_left, insight_right = st.columns(2)
+    with insight_left:
+        st.caption("高频关键词")
+        if index.insights.top_keywords:
+            st.write("、".join(f"{word} ({count})" for word, count in index.insights.top_keywords))
+        else:
+            st.info("暂无可提取关键词。")
+    with insight_right:
+        st.caption("数值发现")
+        st.write("、".join(index.insights.numeric_discoveries) if index.insights.numeric_discoveries else "暂无数值发现。")
 
 ask_tab, summary_tab, data_tab = st.tabs(["问答检索", "结构化摘要", "CSV 分析"])
 with ask_tab:
@@ -104,6 +117,11 @@ with ask_tab:
             answer_col, citation_col = st.columns([1.12, .88], gap="large")
             with answer_col:
                 st.markdown("### 答案")
+                status_labels = {"grounded": "grounded · 证据充分", "low_evidence": "low_evidence · 证据有限", "no_evidence": "no_evidence · 无证据"}
+                st.caption(f"质量状态：{status_labels[result.quality_status]}")
+                quality_a, quality_b = st.columns(2)
+                quality_a.metric("Confidence", f"{result.confidence:.1%}")
+                quality_b.metric("Citation coverage", f"{result.citation_coverage:.1%}")
                 st.write(result.text)
                 st.download_button("下载答案", result.text, file_name="answer.txt", mime="text/plain", icon="⬇️")
             with citation_col:
@@ -113,6 +131,7 @@ with ask_tab:
                 for number, hit in enumerate(result.citations, 1):
                     location = f" · {hit.chunk.locator}" if hit.chunk.locator else ""
                     with st.expander(f"[{number}] {Path(hit.chunk.source).name}{location} · {hit.score:.3f}"):
+                        st.caption(f"混合分数 {hit.score:.3f} · TF-IDF {hit.tfidf_score:.3f} · 关键词覆盖 {hit.keyword_score:.1%}")
                         st.code(hit.chunk.text, language="text")
         except RuntimeError as exc:
             st.error(str(exc))

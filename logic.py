@@ -1,8 +1,9 @@
-"""Offline document retrieval, citations, structured summaries, and CSV analysis."""
+"""Offline document retrieval, citations, structured summaries, and corpus insights."""
 from __future__ import annotations
 
 import csv
 import re
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Protocol, Sequence
@@ -30,12 +31,29 @@ class Chunk:
 class SearchHit:
     chunk: Chunk
     score: float
+    tfidf_score: float = 0.0
+    keyword_score: float = 0.0
+
+    @property
+    def confidence(self) -> float:
+        return self.score
 
 
 @dataclass(frozen=True)
 class Answer:
     text: str
     citations: list[SearchHit]
+    quality_status: str = "no_evidence"
+    citation_coverage: float = 0.0
+    confidence: float = 0.0
+
+
+@dataclass(frozen=True)
+class CorpusInsights:
+    file_count: int
+    chunk_count: int
+    top_keywords: list[tuple[str, int]]
+    numeric_discoveries: list[str]
 
 
 @dataclass(frozen=True)
@@ -140,8 +158,7 @@ def analyze_csv(path: str | Path, preview_rows: int = 8) -> CSVAnalysis:
             except ValueError:
                 pass
         if values:
-            numeric[column] = {"sum": float(sum(values)), "mean": float(np.mean(values)),
-                               "min": float(min(values)), "max": float(max(values))}
+            numeric[column] = {"sum": float(sum(values)), "mean": float(np.mean(values)), "min": float(min(values)), "max": float(max(values))}
     date_column = next((c for c in columns if any(re.match(r"^\d{4}[-/]\d{1,2}", r.get(c, "")) for r in rows)), None)
     return CSVAnalysis(len(rows), columns, numeric, date_column, rows[:preview_rows])
 
@@ -152,24 +169,34 @@ class DocumentIndex:
         self.vectorizer = TfidfVectorizer(tokenizer=tokenize, preprocessor=None, token_pattern=None)
         texts = [c.text for c in self.chunks]
         self.matrix = self.vectorizer.fit_transform(texts) if texts and any(tokenize(t) for t in texts) else None
+        counts = Counter(token for text in texts for token in tokenize(text))
+        numbers = sorted(set(re.findall(r"(?<![A-Za-z])[+-]?\d+(?:[,.]\d+)*(?:%|万元|元|人|天)?", " ".join(texts))))
+        self.insights = CorpusInsights(file_count=len({c.source for c in self.chunks}), chunk_count=len(self.chunks), top_keywords=counts.most_common(10), numeric_discoveries=numbers[:20])
 
     def search(self, query: str, top_k: int = 3, min_score: float = 0.01) -> list[SearchHit]:
         if not self.chunks or not query.strip() or self.matrix is None or top_k < 1:
             return []
-        scores = cosine_similarity(self.vectorizer.transform([query]), self.matrix).ravel()
+        tfidf = cosine_similarity(self.vectorizer.transform([query]), self.matrix).ravel()
         terms = set(tokenize(query))
+        raw: list[SearchHit] = []
         for i, chunk in enumerate(self.chunks):
-            scores[i] += 0.03 * len(terms & set(tokenize(chunk.text)))
-        order = np.argsort(-scores)[:top_k]
-        return [SearchHit(self.chunks[i], float(scores[i])) for i in order if scores[i] >= min_score]
+            covered = len(terms & set(tokenize(chunk.text))) / len(terms) if terms else 0.0
+            combined = 0.75 * float(tfidf[i]) + 0.25 * covered
+            raw.append(SearchHit(chunk, combined, float(tfidf[i]), covered))
+        return [hit for hit in sorted(raw, key=lambda h: h.score, reverse=True)[:top_k] if hit.score >= min_score]
 
     def ask(self, question: str, top_k: int = 3, provider: AnswerProvider | None = None) -> Answer:
         hits = self.search(question, top_k)
+        terms = set(tokenize(question))
+        covered = set(token for hit in hits for token in tokenize(hit.chunk.text))
+        coverage = len(terms & covered) / len(terms) if terms else 0.0
+        confidence = max((hit.confidence for hit in hits), default=0.0)
+        status = "no_evidence" if not hits else ("grounded" if confidence >= 0.35 and coverage >= 0.5 else "low_evidence")
         context = "\n".join(f"[{i + 1}] {hit.chunk.text}" for i, hit in enumerate(hits))
-        return Answer((provider or OfflineProvider()).answer(question, context), hits)
+        return Answer((provider or OfflineProvider()).answer(question, context), hits, status, coverage, confidence)
 
     def summarize(self, top_k: int = 5) -> Summary:
-        hits = [SearchHit(c, 1.0) for c in self.chunks[:top_k]]
+        hits = [SearchHit(c, 1.0, 1.0, 1.0) for c in self.chunks[:top_k]]
         if not hits:
             return Summary("暂无可总结内容。", [], ["没有已索引文档"], [], [])
         points = [h.chunk.text for h in hits]
